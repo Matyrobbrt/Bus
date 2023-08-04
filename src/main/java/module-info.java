@@ -7,6 +7,7 @@ open module net.minecraftforge.eventbus {
     requires org.apache.logging.log4j;
     requires static org.jetbrains.annotations;
     requires net.jodah.typetools;
+    requires jdk.unsupported;
 
     exports net.minecraftforge.eventbus;
     exports net.minecraftforge.eventbus.api;

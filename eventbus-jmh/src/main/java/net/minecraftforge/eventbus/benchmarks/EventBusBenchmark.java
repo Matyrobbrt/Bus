@@ -2,8 +2,12 @@ package net.minecraftforge.eventbus.benchmarks;
 
 import cpw.mods.bootstraplauncher.BootstrapLauncher;
 import cpw.mods.modlauncher.api.ServiceRunner;
+import net.minecraftforge.eventbus.api.IEventBus;
 import net.minecraftforge.eventbus.benchmarks.compiled.BenchmarkArmsLength;
 
+import java.lang.reflect.InvocationTargetException;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.function.Consumer;
 
 import org.openjdk.jmh.annotations.Benchmark;
@@ -17,10 +21,14 @@ public class EventBusBenchmark {
 
     private Object ModLauncher;
     private Object ClassLoader;
+    private Object ModLauncherInvoker;
+    private Object ClassLoaderInvoker;
     private Consumer<Object> postStatic;
     private Consumer<Object> postDynamic;
     private Consumer<Object> postLambda;
     private Consumer<Object> postCombined;
+    private Consumer<Object> postFI;
+    private Consumer<Object> postFIWithInvoker;
 
     @SuppressWarnings("unchecked")
     @Setup
@@ -33,10 +41,24 @@ public class EventBusBenchmark {
         Class<?> cls = Class.forName(ARMS_LENGTH, false, Thread.currentThread().getContextClassLoader());
         ModLauncher  = cls.getField("ModLauncher").get(null);
         ClassLoader  = cls.getField("ClassLoader").get(null);
+        final Class fiBasedClass = Thread.currentThread().getContextClassLoader().loadClass("net.minecraftforge.eventbus.benchmarks.compiled.FIEvent");
+        ModLauncherInvoker = ((IEventBus) getRecordComponent(ModLauncher, "fiSubscriberBus")).grabInvoker(fiBasedClass);
+        ClassLoaderInvoker = ((IEventBus) getRecordComponent(ClassLoader, "fiSubscriberBus")).grabInvoker(fiBasedClass);
         postStatic   = (Consumer<Object>)cls.getField("postStatic").get(null);
         postDynamic  = (Consumer<Object>)cls.getField("postDynamic").get(null);
         postLambda   = (Consumer<Object>)cls.getField("postLambda").get(null);
         postCombined = (Consumer<Object>)cls.getField("postCombined").get(null);
+        postFI = (Consumer<Object>)cls.getField("postFI").get(null);
+        postFIWithInvoker = (Consumer<Object>)cls.getField("postFIWithInvoker").get(null);
+    }
+
+    private static Object getRecordComponent(Object obj, String name) throws InvocationTargetException, IllegalAccessException {
+        return Arrays.stream(obj.getClass().getRecordComponents())
+                .filter(c -> c.getName().equals(name))
+                .findFirst()
+                .orElseThrow()
+                .getAccessor()
+                .invoke(obj);
     }
 
     public static class TestCallback {
@@ -70,6 +92,18 @@ public class EventBusBenchmark {
         return 0;
     }
 
+    @Benchmark
+    public int testModLauncherFI() throws Throwable {
+        postFI.accept(ModLauncher);
+        return 0;
+    }
+
+    @Benchmark
+    public int testModLauncherFIWithInvoker() throws Throwable {
+        postFIWithInvoker.accept(ModLauncherInvoker);
+        return 0;
+    }
+
     // ClassLoader ASM Factory
     @Benchmark
     public int testClassLoaderDynamic() throws Throwable {
@@ -92,6 +126,18 @@ public class EventBusBenchmark {
     @Benchmark
     public int testClassLoaderCombined() throws Throwable {
         postCombined.accept(ClassLoader);
+        return 0;
+    }
+
+    @Benchmark
+    public int testClassLoaderFI() throws Throwable {
+        postFI.accept(ClassLoader);
+        return 0;
+    }
+
+    @Benchmark
+    public int testClassLoaderFIWithInvoker() throws Throwable {
+        postFIWithInvoker.accept(ClassLoaderInvoker);
         return 0;
     }
 }

@@ -3,6 +3,9 @@ package net.minecraftforge.eventbus.benchmarks.compiled;
 import java.util.function.Consumer;
 
 import net.minecraftforge.eventbus.api.BusBuilder;
+import net.minecraftforge.eventbus.api.EventPriority;
+import net.minecraftforge.eventbus.api.FunctionalInvoker;
+import net.minecraftforge.eventbus.api.FunctionalListener;
 import net.minecraftforge.eventbus.api.IEventBus;
 
 public class BenchmarkArmsLength
@@ -11,7 +14,8 @@ public class BenchmarkArmsLength
         IEventBus staticSubscriberBus,
         IEventBus dynamicSubscriberBus,
         IEventBus lambdaSubscriberBus,
-        IEventBus combinedSubscriberBus
+        IEventBus combinedSubscriberBus,
+        IEventBus fiSubscriberBus
     ) {
         public Bus register() {
             staticSubscriberBus.register(SubscriberStatic.class);
@@ -19,6 +23,12 @@ public class BenchmarkArmsLength
             dynamicSubscriberBus.register(new SubscriberDynamic());
             combinedSubscriberBus.register(new SubscriberDynamic());
             SubscriberLambda.register(lambdaSubscriberBus);
+            fiSubscriberBus.addListener(EventPriority.NORMAL, FIEvent.class, () -> {});
+            fiSubscriberBus.createInvoker(FIEvent.class, listeners -> () -> {
+                for (FunctionalListener<FIEvent> listener : listeners) {
+                    listener.listener().run();
+                }
+            });
             SubscriberLambda.register(combinedSubscriberBus);
             return this;
         }
@@ -36,9 +46,11 @@ public class BenchmarkArmsLength
                 BusBuilder.builder().useModLauncher().build(),
                 BusBuilder.builder().useModLauncher().build(),
                 BusBuilder.builder().useModLauncher().build(),
+                BusBuilder.builder().useModLauncher().build(),
                 BusBuilder.builder().useModLauncher().build()
             ).register();
             ClassLoader = new Bus(
+                BusBuilder.builder().build(),
                 BusBuilder.builder().build(),
                 BusBuilder.builder().build(),
                 BusBuilder.builder().build(),
@@ -53,6 +65,7 @@ public class BenchmarkArmsLength
         BusBuilder.builder().build(),
         BusBuilder.builder().build(),
         BusBuilder.builder().build(),
+        BusBuilder.builder().build(),
         BusBuilder.builder().build()
     ).register();
 
@@ -60,6 +73,8 @@ public class BenchmarkArmsLength
     public static final Consumer<Object> postDynamic = BenchmarkArmsLength::postDynamic;
     public static final Consumer<Object> postLambda = BenchmarkArmsLength::postLambda;
     public static final Consumer<Object> postCombined = BenchmarkArmsLength::postCombined;
+    public static final Consumer<Object> postFI = BenchmarkArmsLength::postFI;
+    public static final Consumer<Object> postFIWithInvoker = BenchmarkArmsLength::postFIWithInvoker;
 
     public static void postStatic(Object bus)
     {
@@ -79,6 +94,16 @@ public class BenchmarkArmsLength
     public static void postCombined(Object bus)
     {
         postAll(((Bus)bus).combinedSubscriberBus);
+    }
+
+    public static void postFI(Object bus)
+    {
+        ((Bus) bus).fiSubscriberBus.grabInvoker(FIEvent.class).get().run();
+    }
+
+    public static void postFIWithInvoker(Object invoker)
+    {
+        ((FunctionalInvoker<FIEvent>) invoker).get().run();
     }
 
     private static void postAll(IEventBus bus)

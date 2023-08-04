@@ -24,7 +24,14 @@ import net.minecraftforge.eventbus.api.*;
 import org.apache.logging.log4j.LogManager;
 import org.apache.logging.log4j.Logger;
 import org.objectweb.asm.Type;
+import sun.misc.Unsafe;
 
+import java.lang.invoke.LambdaConversionException;
+import java.lang.invoke.LambdaMetafactory;
+import java.lang.invoke.MethodHandle;
+import java.lang.invoke.MethodHandles;
+import java.lang.invoke.MethodType;
+import java.lang.reflect.Field;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
@@ -43,7 +50,7 @@ public class EventBus implements IEventExceptionHandler, IEventBus {
     private final boolean trackPhases;
 
 
-    private ConcurrentHashMap<Object, List<IEventListener>> listeners = new ConcurrentHashMap<>();
+    private ConcurrentHashMap<Object, List<Object>> listeners = new ConcurrentHashMap<>();
     private final int busID = maxID.getAndIncrement();
     private final IEventExceptionHandler exceptionHandler;
     private volatile boolean shutdown = false;
@@ -51,6 +58,7 @@ public class EventBus implements IEventExceptionHandler, IEventBus {
     private final Class<?> baseType;
     private final boolean checkTypesOnDispatch;
     private final IEventListenerFactory factory;
+    private final Map<Class<?>, FunctionalListenerList<?>> functionalListeners = new ConcurrentHashMap<>();
 
     @SuppressWarnings("unused")
     private EventBus() {
@@ -129,7 +137,72 @@ public class EventBus implements IEventExceptionHandler, IEventBus {
         }
     }
 
+    private static final Unsafe UNSAFE;
+
+    private static final MethodHandles.Lookup HANDLE;
+    private static final MethodHandle NEW_LOOKUP;
+
+    static {
+        try {
+            final Field theUnsafe = Unsafe.class.getDeclaredField("theUnsafe");
+            theUnsafe.setAccessible(true);
+            UNSAFE = (Unsafe)theUnsafe.get(null);
+
+            HANDLE = getStaticField(MethodHandles.Lookup.class.getDeclaredField("IMPL_LOOKUP"));
+            NEW_LOOKUP = HANDLE.findConstructor(MethodHandles.Lookup.class, MethodType.methodType(void.class, Class.class));
+        } catch (Exception exception) {
+            throw new RuntimeException("hmmmmm");
+        }
+    }
+
+    public static <T> T getStaticField(Field field) {
+        return (T) UNSAFE.getObject(UNSAFE.staticFieldBase(field), UNSAFE.staticFieldOffset(field));
+    }
+
+    public static MethodHandles.Lookup newLookup(Class<?> caller) {
+        try {
+            return (MethodHandles.Lookup) NEW_LOOKUP.invokeExact(caller);
+        } catch (Throwable e) {
+            throw new RuntimeException(e);
+        }
+    }
+
     private void registerListener(final Object target, final Method method, final Method real) {
+        final SubscribeEvent methodAnnotation = method.getAnnotation(SubscribeEvent.class);
+        if (methodAnnotation.value() != IFunctionalEvent.class) {
+            final Method funcMethod = Arrays.stream(methodAnnotation.value().getDeclaredMethods())
+                    .filter(m -> Modifier.isAbstract(m.getModifiers()))
+                    .findFirst().orElseThrow();
+            Class<?>[] parameterTypes = method.getParameterTypes();
+            if (!Arrays.equals(parameterTypes, funcMethod.getParameterTypes()) || method.getReturnType() != funcMethod.getReturnType()) {
+                throw new IllegalArgumentException(
+                        "Method " + method + " has @SubscribeEvent annotation for the " + methodAnnotation.value() + " functional event." +
+                        "Its descriptor is " + Type.getMethodDescriptor(method) +
+                        "but event handler methods for that type require the descriptor " + Type.getMethodDescriptor(funcMethod) + "!"
+                );
+            }
+            final MethodType type = MethodType.methodType(funcMethod.getReturnType(), funcMethod.getParameterTypes());
+            try {
+                final MethodHandle evtInv = LambdaMetafactory.metafactory(
+                        newLookup(method.getDeclaringClass()), funcMethod.getName(),
+                        MethodType.methodType(methodAnnotation.value(), Modifier.isStatic(method.getModifiers()) ? new Class[] {} : new Class[] { method.getDeclaringClass() }), type,
+                        Modifier.isStatic(method.getModifiers()) ? HANDLE.findStatic(method.getDeclaringClass(), method.getName(), type) : HANDLE.findVirtual(method.getDeclaringClass(), method.getName(), type),
+                        type
+                ).dynamicInvoker();
+                final IFunctionalEvent invoker;
+                if (Modifier.isStatic(method.getModifiers())) {
+                    invoker = (IFunctionalEvent) evtInv.invokeWithArguments();
+                } else {
+                    invoker = (IFunctionalEvent) evtInv.invokeWithArguments(target);
+                }
+                listeners.computeIfAbsent(target, k -> Collections.synchronizedList(new ArrayList<>())).add(invoker);
+                getFunctionalList((Class) methodAnnotation.value()).addListener(methodAnnotation.priority(), invoker, methodAnnotation.receiveCanceled());
+            } catch (Throwable e) {
+                throw new RuntimeException(e);
+            }
+            return;
+        }
+
         Class<?>[] parameterTypes = method.getParameterTypes();
         if (parameterTypes.length != 1)
         {
@@ -225,6 +298,40 @@ public class EventBus implements IEventExceptionHandler, IEventBus {
         addListener(priority, passGenericFilter(genericClassFilter).and(passCancelled(receiveCancelled)), eventType, consumer);
     }
 
+    @Override
+    public <T extends IFunctionalEvent<?>> void addListener(EventPriority priority, Class<T> eventType, T listener) {
+        getFunctionalList(eventType).addListener(priority, listener, false);
+    }
+
+    @Override
+    public <T extends IFunctionalEvent<?>> FunctionalInvoker<T> createInvoker(Class<T> type, FunctionalInvoker.Builder<T> builder) {
+        return getFunctionalList(type).grabInvoker(builder);
+    }
+
+    @Override
+    public <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker<T> grabInvoker(Class<T> type) {
+        return getFunctionalList(type).grabInvokerOrDefault();
+    }
+
+    @Override
+    public <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker<T> buildDynamicInvoker(Class<T> eventType, Predicate<RETURN> shouldExit) {
+        return getFunctionalList(eventType).grabInvoker(buildDynamicInvokerB(eventType, shouldExit));
+    }
+
+    public <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker.Builder<T> buildDynamicInvokerB(Class<T> eventType, Predicate<RETURN> shouldExit) {
+        try {
+            return factory.buildDynamic(eventType, shouldExit);
+        } catch (Exception e) {
+            throw new RuntimeException(e);
+        }
+//        return new FIBasedWithResultComputer<>(eventType, shouldExit);
+    }
+
+    @Override
+    public <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker<T> grabInvokerOrDynamic(Class<T> eventType, Predicate<RETURN> shouldExit) {
+        return getFunctionalList(eventType).orIfDefault(() -> buildDynamicInvokerB(eventType, shouldExit));
+    }
+
     @SuppressWarnings("unchecked")
     private <T extends Event> Class<T> getEventClass(Consumer<T> consumer) {
         final Class<T> eventClass = (Class<T>) TypeResolver.resolveRawArgument(Consumer.class, consumer.getClass());
@@ -275,19 +382,36 @@ public class EventBus implements IEventExceptionHandler, IEventBus {
     private void addToListeners(final Object target, final Class<?> eventType, final IEventListener listener, final EventPriority priority) {
         ListenerList listenerList = EventListenerHelper.getListenerList(eventType);
         listenerList.register(busID, priority, listener);
-        List<IEventListener> others = listeners.computeIfAbsent(target, k -> Collections.synchronizedList(new ArrayList<>()));
+        List<Object> others = listeners.computeIfAbsent(target, k -> Collections.synchronizedList(new ArrayList<>()));
         others.add(listener);
     }
 
     @Override
     public void unregister(Object object)
     {
-        List<IEventListener> list = listeners.remove(object);
+        if (object instanceof IFunctionalEvent<?> func) {
+            for (Class<?> anInterface : object.getClass().getInterfaces()) {
+                if (IFunctionalEvent.class.isAssignableFrom(anInterface)) {
+                    getFunctionalList((Class)anInterface).unregister(func);
+                }
+            }
+            return;
+        }
+
+        List<Object> list = listeners.remove(object);
         if(list == null)
             return;
-        for (IEventListener listener : list)
+        for (Object listener : list)
         {
-            ListenerList.unregisterAll(busID, listener);
+            if (listener instanceof IFunctionalEvent<?> functionalListener) {
+                for (Class<?> anInterface : object.getClass().getInterfaces()) {
+                    if (IFunctionalEvent.class.isAssignableFrom(anInterface)) {
+                        getFunctionalList((Class)anInterface).unregister(functionalListener);
+                    }
+                }
+            } else {
+                ListenerList.unregisterAll(busID, (IEventListener) listener);
+            }
         }
     }
 
@@ -339,5 +463,9 @@ public class EventBus implements IEventExceptionHandler, IEventBus {
     @Override
     public void start() {
         this.shutdown = false;
+    }
+
+    private <T extends IFunctionalEvent<?>> FunctionalListenerList<T> getFunctionalList(Class<T> type) {
+        return (FunctionalListenerList<T>) functionalListeners.computeIfAbsent(type, t -> new FunctionalListenerList<>(this, (Class)t));
     }
 }

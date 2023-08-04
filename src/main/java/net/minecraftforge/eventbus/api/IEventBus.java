@@ -1,6 +1,7 @@
 package net.minecraftforge.eventbus.api;
 
 import java.util.function.Consumer;
+import java.util.function.Predicate;
 
 /**
  * EventBus API.
@@ -69,6 +70,12 @@ public interface IEventBus {
      * @param <T> The {@link Event} subclass to listen for
      */
     <T extends Event> void addListener(EventPriority priority, boolean receiveCancelled, Class<T> eventType, Consumer<T> consumer);
+
+    <T extends IFunctionalEvent<?>> void addListener(EventPriority priority, Class<T> eventType, T listener);
+
+    <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker<T> buildDynamicInvoker(Class<T> eventType, Predicate<RETURN> shouldExit);
+
+    <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker<T> grabInvokerOrDynamic(Class<T> eventType, Predicate<RETURN> shouldExit);
 
     /**
      * Add a consumer listener for a {@link GenericEvent} subclass, filtered to only be called for the specified
@@ -144,6 +151,10 @@ public interface IEventBus {
      * @return true if the event was {@link Cancelable} cancelled
      */
     boolean post(Event event);
+
+    <T extends IFunctionalEvent<?>> FunctionalInvoker<T> createInvoker(Class<T> type, FunctionalInvoker.Builder<T> builder);
+
+    <RETURN, T extends IFunctionalEvent<RETURN>> FunctionalInvoker<T> grabInvoker(Class<T> type);
 
     /**
      * Submit the event for dispatch to listeners. The invoke wrapper allows for

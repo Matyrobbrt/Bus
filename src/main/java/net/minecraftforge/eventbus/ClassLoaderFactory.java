@@ -3,7 +3,15 @@ package net.minecraftforge.eventbus;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
+import java.util.Arrays;
 import java.util.HashMap;
+import java.util.function.BiFunction;
+import java.util.function.Function;
+import java.util.function.Predicate;
+
+import net.minecraftforge.eventbus.api.FunctionalInvoker;
+import net.minecraftforge.eventbus.api.FunctionalListener;
+import net.minecraftforge.eventbus.api.IFunctionalEvent;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.MethodVisitor;
 import org.objectweb.asm.Type;
@@ -29,6 +37,39 @@ public class ClassLoaderFactory implements IEventListenerFactory {
             return (IEventListener)cls.getConstructor(Object.class).newInstance(target);
     }
 
+    @Override
+    public <RESULT, T extends IFunctionalEvent<RESULT>> FunctionalInvoker.Builder<T> buildDynamic(Class<T> type, Predicate<RESULT> resultPredicate) throws Exception {
+        final Method method = Arrays.stream(type.getMethods())
+                .filter(mt -> Modifier.isAbstract(mt.getModifiers()))
+                .findFirst().orElseThrow();
+        final ClassNode node;
+        if (method.getReturnType() == void.class) {
+            node = FIBasedWithoutResultGenerator.generate(type, method, this);
+        } else {
+            node = FIBasedWithResultGenerator.generate(type, method, this);
+        }
+        final Class<?> clz = ClassLoaderFactory.defineClass(node);
+
+        if (method.getReturnType() == void.class) {
+            final Function<FunctionalListener<T>[], T> creator = (list) -> {
+                try {
+                    return (T) clz.getDeclaredConstructor(FunctionalListener[].class).newInstance(new Object[] { list });
+                } catch (Exception ex) {
+                    throw new RuntimeException(ex);
+                }
+            };
+            return creator::apply;
+        } else {
+            final BiFunction<Predicate<RESULT>, FunctionalListener<T>[], T> creator = (pred, list) -> {
+                try {
+                    return (T) clz.getDeclaredConstructor(Predicate.class, FunctionalListener[].class).newInstance(pred, list);
+                } catch (Exception ex) {
+                    throw new RuntimeException(ex);
+                }
+            };
+            return listeners -> creator.apply(resultPredicate, listeners);
+        }
+    }
 
     protected Class<?> createWrapper(Method callback) throws ClassNotFoundException {
         return cache.computeIfAbsent(callback, () -> {
@@ -39,7 +80,7 @@ public class ClassLoaderFactory implements IEventListenerFactory {
     }
 
     private static final Class<?> defineClass(ClassNode node) {
-        var cw = new ClassWriter(0);
+        var cw = new ClassWriter(ClassWriter.COMPUTE_MAXS | ClassWriter.COMPUTE_FRAMES);
         node.accept(cw);
         return LOADER.define(node.name.replace('/', '.'), cw.toByteArray());
     }

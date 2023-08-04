@@ -44,7 +44,9 @@ task jmh(type: JavaExec, dependsOn: sourceSets.main.output) {
     args    '-prof', 'stack' // profilers
     args    '-tu', 'ns' // time unit
     args    '-f', '3' // forks
+    args    '-rf', 'csv'
     args    '-rff', project.file("${rootProject.buildDir}/jmh_results.txt")  // results file
     args    'net.minecraftforge.eventbus.benchmarks.EventBusBenchmark'
     args    'net.minecraftforge.eventbus.benchmarks.EventBusBenchmarkNoLoader'
+//    args    'net.minecraftforge.eventbus.benchmarks.BenchmarkFIVsObj'
 }
